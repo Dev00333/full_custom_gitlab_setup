@@ -89,7 +89,7 @@ To enable it:
 ├── auto_restore.sh                   # One-shot disaster-recovery restore script
 └── scripts/
     ├── backup-script.sh              # Creates a full backup archive
-    ├── backup_wrapper/
+    ├── backup_wrappers/
     │   └── backup_wrapper.sh         # Runs backup, prunes old local copies
     ├── systemd/
     │   ├── gitlab-backup.service     # Runs backup_wrapper.sh once
@@ -103,7 +103,7 @@ To enable it:
 
 ## Automated scheduling — `backup_wrapper.sh`
 
-`scripts/backup_wrapper/backup_wrapper.sh` wraps `backup-script.sh` for unattended, scheduled runs. It handles two things `backup-script.sh` doesn't:
+`scripts/backup_wrappers/backup_wrapper.sh` wraps `backup-script.sh` for unattended, scheduled runs. It handles two things `backup-script.sh` doesn't:
 
 1. **Runs the backup** (which creates the local `.tar.gz` and, if enabled, uploads it to Azure Blob Storage).
 2. **Prunes old local backups** — but only after confirming the new backup actually succeeded and isn't empty/truncated. Keeps just the newest local archive; **Azure Blob is never touched by this script** — old blobs there are retained regardless of local cleanup.
@@ -127,7 +127,7 @@ cp scripts/backup-script.sh /gitlabs/backups-gitlab/backup-script.sh
 chmod +x /gitlabs/backups-gitlab/backup-script.sh
 
 # Install the wrapper somewhere on PATH so systemd can call it directly
-cp scripts/backup_wrapper/backup_wrapper.sh /usr/local/bin/backup_wrapper.sh
+cp scripts/backup_wrappers/backup_wrapper.sh /usr/local/bin/backup_wrapper.sh
 chmod +x /usr/local/bin/backup_wrapper.sh
 ```
 
