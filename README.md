@@ -62,6 +62,8 @@ Output: `/gitlabs/gitlab-backup/gitlab-complete-<timestamp>.tar.gz`
 
 Local backups on the same host they're protecting aren't real disaster recovery — if the VM or disk is lost, the backup goes with it. The script includes a commented-out upload step (via `az storage blob upload` + SAS token) at the bottom to send each archive to Azure Blob Storage after it's created.
 
+> **Note:** Azure Blob Storage is the only offsite target supported today. Support for other providers (S3, GCS, etc.) is a planned future addition — see [Roadmap](#roadmap) below.
+
 To enable it:
 
 1. **Uncomment** the block at the bottom of `scripts/backup-script.sh` (the `# echo "==> 7. Uploading..."` section onward).
@@ -170,7 +172,6 @@ Logs are also written to `/var/log/gitlab-backup.log` (created/appended automati
 Update these paths at the top of the script if your layout differs from the defaults above.
 
 ---
----
 
 ## 3. Disaster recovery — `auto_restore.sh`
 
@@ -227,6 +228,48 @@ docker exec gitlab gitlab-ctl reconfigure
 
 ---
 
+## Running behind a reverse proxy (nginx + TLS)
+
+This repo's `docker-compose.yaml` sets up GitLab with plain HTTP (`nginx['listen_https'] = false`) and no TLS termination — it's designed to sit behind a reverse proxy or be reachable only over a private network/VPN, not to be exposed directly to the internet.
+
+If you put nginx (or another reverse proxy) in front with TLS termination — e.g. via Let's Encrypt/Certbot — there are two things this repo does **not** handle automatically and you'll need to set up yourself:
+
+1. **`external_url` must match your real HTTPS domain, not the auto-detected IP.**
+   `auto_restore.sh`'s IP auto-detection (AWS/Azure metadata → public IP-echo fallback) is designed for a standalone instance reachable directly by IP. It has no awareness of a reverse proxy sitting in front, so after any restore it will set `external_url` to `http://<detected-ip>:8080` regardless of your actual domain/TLS setup. After restoring:
+   ```bash
+   # Either override at restore time:
+   GITLAB_HOSTNAME=gitlab.yourdomain.com sudo bash auto_restore.sh
+   # ...then still patch external_url to https:// manually afterward (see below), or:
+
+   # Patch directly, any time:
+   docker exec gitlab sed -i -E \
+     "s|^external_url ['\"].*['\"]|external_url 'https://gitlab.yourdomain.com'|" \
+     /etc/gitlab/gitlab.rb
+   docker exec gitlab gitlab-ctl reconfigure
+   ```
+
+2. **Tell GitLab to trust your proxy's forwarded headers.** Without this, GitLab can generate broken links/redirects (wrong scheme, wrong host) because it doesn't know a proxy is terminating TLS on its behalf. Add to `gitlab.rb` (on the host: `/code/gitlab/config/gitlab.rb`) and reconfigure:
+   ```ruby
+   nginx['real_ip_trusted_addresses'] = ['<your-reverse-proxy-IP>/32']
+   nginx['real_ip_header'] = 'X-Forwarded-For'
+   nginx['real_ip_recursive'] = 'on'
+   ```
+   ```bash
+   docker exec gitlab gitlab-ctl reconfigure
+   ```
+
+3. **Point your nginx `proxy_pass` at `http://<vm-ip>:8080`** (the container's exposed HTTP port), with standard proxy headers:
+   ```nginx
+   proxy_set_header Host $host;
+   proxy_set_header X-Real-IP $remote_addr;
+   proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+   proxy_set_header X-Forwarded-Proto $scheme;
+   ```
+
+Repeat step 1's `external_url` patch after every `auto_restore.sh` run — it's not persisted anywhere the script knows to re-apply automatically.
+
+---
+
 ## Defaults reference
 
 | Setting | Default | Override |
@@ -240,17 +283,28 @@ docker exec gitlab gitlab-ctl reconfigure
 
 ## Requirements
 
-- A Linux VM (tested against Ubuntu/apt-based hosts — `setup1.sh` and `auto_restore.sh` both call `apt-get`)
+- A Linux VM with `systemd` (used for scheduling — see [Automated scheduling](#automated-scheduling--backup_wrappersh))
+- Docker + Docker Compose (installed automatically by `setup1.sh`/`setup2.sh` on apt-based distros; install manually first on other distros)
 - Root/sudo access
+- `curl` and `tar` (used for IP detection, version parsing, and archive handling — present by default on virtually all Linux distros)
 - Outbound internet access to pull `gitlab/gitlab-ce` images from Docker Hub
 - Enough free disk for GitLab data + roughly 4x the backup archive size during restore
+- **Only if enabling offsite upload:** Azure CLI (`az`) installed on the host, plus an Azure Storage account and a SAS token scoped to it (see [Optional: offsite upload to Azure Blob Storage](#optional-offsite-upload-to-azure-blob-storage))
 
 ## Known limitations
 
 - `auto_restore.sh` assumes an apt-based distro for Docker installation.
 - Restore currently expects exactly one backup archive in the script's directory.
 - Cloud metadata IP detection is tuned for AWS and Azure; other clouds fall through to the public IP-echo services.
-- No TLS termination in `docker-compose.yaml` — this repo assumes GitLab sits behind a reverse proxy, load balancer, or is otherwise only reachable over a private network/VPN. If exposing it directly to the internet, put TLS in front of it.
+- No TLS termination in `docker-compose.yaml` — this repo assumes GitLab sits behind a reverse proxy, load balancer, or is otherwise only reachable over a private network/VPN. See [Running behind a reverse proxy](#running-behind-a-reverse-proxy-nginx--tls) for the `external_url` and forwarded-headers setup this requires.
 - Scheduling is systemd-only in this repo — there's no cron fallback included. If your VM doesn't run systemd, you'll need to adapt `gitlab-backup.service`'s `ExecStart` into a cron entry yourself.
-- Offsite (Azure Blob) upload is opt-in and off by default in `backup-script.sh`; without enabling it, backups live only on the same host they're protecting.
+- Offsite backup upload only supports Azure Blob Storage today; without enabling it, backups live only on the same host they're protecting. See [Roadmap](#roadmap).
 - The backup wrapper prunes old **local** archives only — it has no retention policy for Azure Blob Storage itself; set lifecycle rules on the container in Azure if you want old blobs cleaned up automatically.
+
+## Roadmap
+
+- **Multi-cloud offsite backup support** — Azure Blob Storage is the only supported target today. AWS S3 and Google Cloud Storage support are planned as configurable alternatives to the current Azure-only upload step.
+- Broader distro support for `auto_restore.sh` beyond apt-based systems.
+- Optional cron-based scheduling alongside the current systemd-only path, for non-systemd hosts.
+
+Contributions and PRs toward any of the above are welcome.
