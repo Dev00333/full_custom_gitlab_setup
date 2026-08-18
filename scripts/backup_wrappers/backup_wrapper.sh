@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# backup-cron-wrapper.sh
+# backup_wrapper.sh
 #
 # Runs the existing GitLab backup script (which creates the tar.gz AND
 # uploads it to Azure Blob Storage), and — only if that succeeds — deletes
@@ -9,14 +9,15 @@
 # Azure Blob Storage is never touched by this script; old blobs stay there
 # regardless of what happens locally.
 #
-# Intended to run via cron every 3 days.
+# Scheduled via systemd (gitlab-backup.timer -> gitlab-backup.service),
+# every 3 days.
 
 set -euo pipefail
 
 # ---- Config ----
 BACKUP_SCRIPT="/gitlabs/backups-gitlab/backup-script.sh"
 BACKUP_DIR="/gitlabs/gitlab-backup"
-LOG_FILE="/var/log/gitlab-backup-cron.log"
+LOG_FILE="/var/log/gitlab-backup.log"
 
 log() {
   echo "$(date -u +'%Y-%m-%dT%H:%M:%SZ') $*" | tee -a "$LOG_FILE"

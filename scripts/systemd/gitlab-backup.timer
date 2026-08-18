@@ -1,0 +1,11 @@
+[Unit]
+Description=Run GitLab backup every 3 days (fixed interval)
+
+[Timer]
+OnBootSec=10min
+OnUnitActiveSec=3d
+Unit=gitlab-backup.service
+Persistent=true
+
+[Install]
+WantedBy=timers.target

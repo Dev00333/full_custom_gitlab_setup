@@ -9,23 +9,6 @@ This repo covers three things:
 
 ---
 
-## Repo layout
-
-```
-.
-├── docker-compose.yaml               # Base compose file for a fresh install
-├── auto_restore.sh                   # One-shot disaster-recovery restore script
-└── scripts/
-    ├── backup-script.sh              # Creates a full backup archive
-    ├── cron_wrappers/
-    │   └── backup_cron_wrapper.sh    # Scheduled wrapper: runs backup, prunes old local copies
-    └── first_time_setup/
-        ├── setup1.sh                 # Installs Docker, adds user to docker group, reboots
-        └── setup2.sh                 # Pulls the image, creates dirs, brings up GitLab
-```
-
----
-
 ## 1. First-time setup
 
 Run these on a fresh VM, in order.
@@ -94,16 +77,38 @@ To enable it:
 3. **Fill in `<storage_account_name>`** in the script with your actual Azure Storage account name, and confirm the container name (`gitlabbackups` by default) already exists.
 4. Scope the SAS token to only what's needed — write/create permissions on the single `gitlabbackups` container, with a sensible expiry (not a decade out), rather than full account access.
 
-**Scheduling:** run this on a `cron` job or systemd timer for regular backups — the script itself doesn't schedule anything. See [Automated scheduling](#automated-scheduling--backup_cron_wrappersh) below for the recommended wrapper.
+**Scheduling:** this repo schedules the wrapper via **systemd** — see below.
 
 ---
 
-## Automated scheduling — `backup_cron_wrapper.sh`
+## Repo layout
 
-`scripts/cron_wrappers/backup_cron_wrapper.sh` wraps `backup-script.sh` for unattended, scheduled runs via cron. It handles two things `backup-script.sh` doesn't:
+```
+.
+├── docker-compose.yaml               # Base compose file for a fresh install
+├── auto_restore.sh                   # One-shot disaster-recovery restore script
+└── scripts/
+    ├── backup-script.sh              # Creates a full backup archive
+    ├── backup_wrapper/
+    │   └── backup_wrapper.sh         # Runs backup, prunes old local copies
+    ├── systemd/
+    │   ├── gitlab-backup.service     # Runs backup_wrapper.sh once
+    │   └── gitlab-backup.timer       # Fires the service every 3 days
+    └── first_time_setup/
+        ├── setup1.sh                 # Installs Docker, adds user to docker group, reboots
+        └── setup2.sh                 # Pulls the image, creates dirs, brings up GitLab
+```
+
+---
+
+## Automated scheduling — `backup_wrapper.sh`
+
+`scripts/backup_wrapper/backup_wrapper.sh` wraps `backup-script.sh` for unattended, scheduled runs. It handles two things `backup-script.sh` doesn't:
 
 1. **Runs the backup** (which creates the local `.tar.gz` and, if enabled, uploads it to Azure Blob Storage).
 2. **Prunes old local backups** — but only after confirming the new backup actually succeeded and isn't empty/truncated. Keeps just the newest local archive; **Azure Blob is never touched by this script** — old blobs there are retained regardless of local cleanup.
+
+This repo schedules it with **systemd** (see below) rather than cron, for dependency ordering on Docker/network, automatic catch-up on missed runs, and better logging via `journalctl`.
 
 ### Safety checks before deleting anything
 
@@ -119,16 +124,40 @@ If any of these fail, **all existing local backups are left untouched** and the 
 # Place the backup script where the wrapper expects it
 mkdir -p /gitlabs/backups-gitlab
 cp scripts/backup-script.sh /gitlabs/backups-gitlab/backup-script.sh
-chmod +x /gitlabs/backups-gitlab/backup-script.sh scripts/cron_wrappers/backup_cron_wrapper.sh
+chmod +x /gitlabs/backups-gitlab/backup-script.sh
+
+# Install the wrapper somewhere on PATH so systemd can call it directly
+cp scripts/backup_wrapper/backup_wrapper.sh /usr/local/bin/backup_wrapper.sh
+chmod +x /usr/local/bin/backup_wrapper.sh
 ```
 
-Then add a cron entry (as root, `crontab -e`) to run it every 3 days:
+### Install the systemd timer
 
-```cron
-0 2 */3 * * /path/to/scripts/cron_wrappers/backup_cron_wrapper.sh
+```bash
+cp scripts/systemd/gitlab-backup.service /etc/systemd/system/gitlab-backup.service
+cp scripts/systemd/gitlab-backup.timer   /etc/systemd/system/gitlab-backup.timer
+systemctl daemon-reload
+systemctl enable --now gitlab-backup.timer
 ```
 
-Logs are written to `/var/log/gitlab-backup-cron.log` (created/appended automatically).
+- `gitlab-backup.timer` fires 10 minutes after boot, then every 3 days thereafter (`OnUnitActiveSec=3d`), and `Persistent=true` means a missed run (e.g. VM was off) fires as soon as the system is back up.
+- `gitlab-backup.service` runs `/usr/local/bin/backup_wrapper.sh` as a `oneshot`, ordered after `docker.service` and `network-online.target` (needed for the Docker backup exec and the Azure upload step), with a 3-hour timeout headroom for large instances.
+
+Check it:
+
+```bash
+systemctl list-timers gitlab-backup.timer
+systemctl status gitlab-backup.service
+journalctl -u gitlab-backup.service -f
+```
+
+Trigger a run manually without waiting for the timer:
+
+```bash
+systemctl start gitlab-backup.service
+```
+
+Logs are also written to `/var/log/gitlab-backup.log` (created/appended automatically) — this is in addition to `journalctl`, not a replacement for it.
 
 ### Config
 
@@ -136,10 +165,11 @@ Logs are written to `/var/log/gitlab-backup-cron.log` (created/appended automati
 |---|---|---|
 | `BACKUP_SCRIPT` | `/gitlabs/backups-gitlab/backup-script.sh` | Path to the underlying backup script |
 | `BACKUP_DIR` | `/gitlabs/gitlab-backup` | Where local backup archives live |
-| `LOG_FILE` | `/var/log/gitlab-backup-cron.log` | Cron run log |
+| `LOG_FILE` | `/var/log/gitlab-backup.log` | Run log |
 
 Update these paths at the top of the script if your layout differs from the defaults above.
 
+---
 ---
 
 ## 3. Disaster recovery — `auto_restore.sh`
@@ -221,6 +251,6 @@ docker exec gitlab gitlab-ctl reconfigure
 - Restore currently expects exactly one backup archive in the script's directory.
 - Cloud metadata IP detection is tuned for AWS and Azure; other clouds fall through to the public IP-echo services.
 - No TLS termination in `docker-compose.yaml` — this repo assumes GitLab sits behind a reverse proxy, load balancer, or is otherwise only reachable over a private network/VPN. If exposing it directly to the internet, put TLS in front of it.
-- `backup_cron_wrapper.sh` schedules via `cron`, not a systemd timer — add the cron entry manually (no systemd unit is included in this repo).
-- Offsite (Azure Blob) upload is opt-in and off by default in `backup-script.sh`; without enabling it, backups live only on the same host they're protecting, even with the cron wrapper in place.
-- The cron wrapper prunes old **local** archives only — it has no retention policy for Azure Blob Storage itself; set lifecycle rules on the container in Azure if you want old blobs cleaned up automatically.
+- Scheduling is systemd-only in this repo — there's no cron fallback included. If your VM doesn't run systemd, you'll need to adapt `gitlab-backup.service`'s `ExecStart` into a cron entry yourself.
+- Offsite (Azure Blob) upload is opt-in and off by default in `backup-script.sh`; without enabling it, backups live only on the same host they're protecting.
+- The backup wrapper prunes old **local** archives only — it has no retention policy for Azure Blob Storage itself; set lifecycle rules on the container in Azure if you want old blobs cleaned up automatically.
