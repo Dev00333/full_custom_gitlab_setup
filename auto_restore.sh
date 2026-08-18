@@ -37,7 +37,7 @@ GITLAB_IMAGE_NAME="gitlab/gitlab-ce"
 
 # Defaults matching the original setup — override via env vars if needed:
 #   GITLAB_HOSTNAME=git.example.com HTTP_PORT=8080 SSH_PORT=6022 bash autorestore.sh
-GITLAB_HOSTNAME="${GITLAB_HOSTNAME:-git.kinexaiot.dev}"
+GITLAB_HOSTNAME="${GITLAB_HOSTNAME:-git.example.local}"
 HTTP_PORT="${HTTP_PORT:-8080}"
 SSH_PORT="${SSH_PORT:-6022}"
 
