@@ -1,0 +1,22 @@
+version: '3.8'
+services:
+  gitlab:
+    # Point this to the exact image tag in your local registry
+    image: gitlab/gitlab-ce:latest
+    container_name: gitlab
+    restart: unless-stopped
+    hostname: <hostname>
+    shm_size: '1g'
+    ports:
+      - "8080:80"
+      - "6022:22"
+    environment:
+      GITLAB_OMNIBUS_CONFIG: |
+        external_url '<external_url>'
+        nginx['listen_port'] = 80
+        nginx['listen_https'] = false
+        gitlab_rails['gitlab_shell_ssh_port'] = 6022
+    volumes:
+      - /code/gitlab/config:/etc/gitlab
+      - /code/gitlab/logs:/var/log/gitlab
+      - /code/gitlab/data:/var/opt/gitlab
